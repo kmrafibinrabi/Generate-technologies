@@ -559,12 +559,12 @@
     note.style.display = 'inline';
 
     var params = {
+      name:         name,
       from_name:    name,
       from_email:   email,
       phone:        phone || 'Not provided',
-      inquiry_type: type,
-      message:      msg,
-      to_email:     'kmrafi.dev@gmail.com'
+      project_type: type,
+      message:      msg
     };
 
     emailjs.send('service_p55wf8u', 'template_bvia36p', params)
