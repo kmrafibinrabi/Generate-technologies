@@ -4,6 +4,12 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>Generate Technologics — Premier Import & Trading Solutions</title>
+  <!-- ══ SECURITY META TAGS ══ -->
+  <meta http-equiv="X-Content-Type-Options" content="nosniff" />
+  <meta http-equiv="X-Frame-Options" content="DENY" />
+  <meta name="referrer" content="strict-origin-when-cross-origin" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://api.emailjs.com; frame-ancestors 'none';" />
+
   <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;600;700;900&family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet"/>
   <style>
     :root {
@@ -482,6 +488,12 @@
           <label for="cf-msg">Message *</label>
           <textarea id="cf-msg" rows="5" placeholder="Describe your requirement or tender details…"></textarea>
         </div>
+        <!-- Honeypot: hidden field bots fill in, humans never see it -->
+        <div style="position:absolute;left:-9999px;top:-9999px;opacity:0;pointer-events:none;" aria-hidden="true">
+          <label for="cf-website">Leave this empty</label>
+          <input id="cf-website" name="website" type="text" tabindex="-1" autocomplete="off" />
+        </div>
+
         <div style="display:flex;align-items:center;gap:1rem;flex-wrap:wrap;">
           <button class="btn-primary" id="submitBtn" onclick="sendInquiry()">Send Inquiry →</button>
           <span id="sendingNote" style="font-size:.82rem;color:var(--slate);display:none;">Sending…</span>
@@ -510,81 +522,165 @@
 <!-- EmailJS SDK -->
 <script src="https://cdn.jsdelivr.net/npm/@emailjs/browser@4/dist/email.min.js"></script>
 <script>
-  /* ── EmailJS initialisation ── */
-  (function(){
-    emailjs.init({ publicKey: '93vBs4pO68y9mUUdM' });
-  })();
+  /* ════════════════════════════════════════════
+     SECURITY LAYER — Generate Technologics
+     ════════════════════════════════════════════ */
 
-  /* ── Scroll-reveal ── */
-  const reveals = document.querySelectorAll('.reveal');
-  const obs = new IntersectionObserver((entries) => {
-    entries.forEach((e, i) => {
+  /* 1. EmailJS init */
+  (function(){ emailjs.init({ publicKey: '93vBs4pO68y9mUUdM' }); })();
+
+  /* 2. Rate limiting — max 3 submissions per 10 minutes per session */
+  var _submitLog = [];
+  var RATE_LIMIT  = 3;
+  var RATE_WINDOW = 10 * 60 * 1000; // 10 minutes in ms
+  function isRateLimited() {
+    var now = Date.now();
+    _submitLog = _submitLog.filter(function(t){ return now - t < RATE_WINDOW; });
+    return _submitLog.length >= RATE_LIMIT;
+  }
+
+  /* 3. Input sanitizer — strips HTML tags and trims whitespace to block XSS injection */
+  function sanitize(str) {
+    return String(str)
+      .replace(/&/g,'&amp;')
+      .replace(/</g,'&lt;')
+      .replace(/>/g,'&gt;')
+      .replace(/"/g,'&quot;')
+      .replace(/'/g,'&#x27;')
+      .replace(/\//g,'&#x2F;')
+      .trim();
+  }
+
+  /* 4. Email header injection guard — blocks newlines that attackers use to inject headers */
+  function hasHeaderInjection(str) {
+    return /[\r\n]/.test(str);
+  }
+
+  /* 5. URL/phishing pattern detector — blocks messages containing suspicious links */
+  function hasPhishingPattern(str) {
+    var patterns = [
+      /https?:\/\//i,           // raw URLs in message
+      /bit\.ly|tinyurl|t\.co/i, // URL shorteners
+      /\bclick here\b/i,        // classic phishing phrase
+      /verify your (account|password|email)/i,
+      /\bfree (money|prize|gift|offer)\b/i,
+      /\bsend (money|btc|bitcoin|usdt)\b/i,
+      /<script|<iframe|<object|javascript:/i // script injection
+    ];
+    return patterns.some(function(p){ return p.test(str); });
+  }
+
+  /* 6. Scroll-reveal */
+  var reveals = document.querySelectorAll('.reveal');
+  var obs = new IntersectionObserver(function(entries){
+    entries.forEach(function(e, i){
       if (e.isIntersecting) {
-        setTimeout(() => e.target.classList.add('visible'), i * 80);
+        setTimeout(function(){ e.target.classList.add('visible'); }, i * 80);
         obs.unobserve(e.target);
       }
     });
   }, { threshold: 0.1, rootMargin: '0px 0px -40px 0px' });
-  reveals.forEach(el => obs.observe(el));
+  reveals.forEach(function(el){ obs.observe(el); });
 
-  /* ── Form submission ── */
+  /* 7. Main send function */
   function sendInquiry() {
-    var name  = document.getElementById('cf-name').value.trim();
-    var phone = document.getElementById('cf-phone').value.trim();
-    var email = document.getElementById('cf-email').value.trim();
-    var type  = document.getElementById('cf-type').value;
-    var msg   = document.getElementById('cf-msg').value.trim();
-    var btn   = document.getElementById('submitBtn');
-    var note  = document.getElementById('sendingNote');
-    var alert = document.getElementById('formAlert');
+    var honeypot = document.getElementById('cf-website').value;
+    var name     = document.getElementById('cf-name').value.trim();
+    var phone    = document.getElementById('cf-phone').value.trim();
+    var email    = document.getElementById('cf-email').value.trim();
+    var type     = document.getElementById('cf-type').value;
+    var msg      = document.getElementById('cf-msg').value.trim();
+    var btn      = document.getElementById('submitBtn');
+    var note     = document.getElementById('sendingNote');
+    var alertEl  = document.getElementById('formAlert');
 
-    /* reset */
-    alert.className = 'form-alert';
-    alert.textContent = '';
+    /* reset alert */
+    alertEl.className  = 'form-alert';
+    alertEl.textContent = '';
 
-    /* validation */
+    /* ── SECURITY CHECKS ── */
+
+    /* Honeypot: if filled, it's a bot — silently reject */
+    if (honeypot) {
+      alertEl.textContent = '✓  Inquiry sent successfully! We will get back to you within 24–48 hours.';
+      alertEl.className   = 'form-alert success'; // fake success to fool bots
+      return;
+    }
+
+    /* Rate limit check */
+    if (isRateLimited()) {
+      alertEl.textContent = '⚠  Too many submissions. Please wait a few minutes before trying again.';
+      alertEl.className   = 'form-alert error';
+      alertEl.scrollIntoView({ behavior:'smooth', block:'nearest' });
+      return;
+    }
+
+    /* Required fields */
     if (!name || !email || !type || !msg) {
-      alert.textContent = '✕  Please fill in all required fields (Name, Email, Inquiry Type, Message).';
-      alert.className = 'form-alert error';
-      alert.scrollIntoView({ behavior:'smooth', block:'nearest' });
-      return;
-    }
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-      alert.textContent = '✕  Please enter a valid email address.';
-      alert.className = 'form-alert error';
+      alertEl.textContent = '✕  Please fill in all required fields (Name, Email, Inquiry Type, Message).';
+      alertEl.className   = 'form-alert error';
+      alertEl.scrollIntoView({ behavior:'smooth', block:'nearest' });
       return;
     }
 
-    btn.disabled = true;
-    note.style.display = 'inline';
+    /* Field length limits — prevents payload flooding */
+    if (name.length > 100) { alertEl.textContent = '✕  Name is too long (max 100 characters).'; alertEl.className = 'form-alert error'; return; }
+    if (email.length > 150) { alertEl.textContent = '✕  Email address is too long.'; alertEl.className = 'form-alert error'; return; }
+    if (msg.length > 2000) { alertEl.textContent = '✕  Message is too long (max 2000 characters).'; alertEl.className = 'form-alert error'; return; }
+
+    /* Email format validation */
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      alertEl.textContent = '✕  Please enter a valid email address.';
+      alertEl.className   = 'form-alert error';
+      return;
+    }
+
+    /* Header injection check on email field */
+    if (hasHeaderInjection(email) || hasHeaderInjection(name)) {
+      alertEl.textContent = '✕  Invalid characters detected. Please check your input.';
+      alertEl.className   = 'form-alert error';
+      return;
+    }
+
+    /* Phishing / suspicious content check */
+    if (hasPhishingPattern(msg)) {
+      alertEl.textContent = '✕  Your message contains content that cannot be submitted. Please remove any URLs or suspicious phrases.';
+      alertEl.className   = 'form-alert error';
+      alertEl.scrollIntoView({ behavior:'smooth', block:'nearest' });
+      return;
+    }
+
+    /* ── ALL CHECKS PASSED — SEND ── */
+    btn.disabled        = true;
+    note.style.display  = 'inline';
+    _submitLog.push(Date.now());
 
     var params = {
-      name:         name,
-      from_name:    name,
-      from_email:   email,
-      phone:        phone || 'Not provided',
-      project_type: type,
-      message:      msg
+      name:         sanitize(name),
+      from_name:    sanitize(name),
+      from_email:   sanitize(email),
+      phone:        sanitize(phone || 'Not provided'),
+      project_type: sanitize(type),
+      message:      sanitize(msg)
     };
 
     emailjs.send('service_p55wf8u', 'template_bvia36p', params)
       .then(function() {
-        alert.textContent = '✓  Inquiry sent successfully! We will get back to you within 24–48 hours.';
-        alert.className = 'form-alert success';
-        alert.scrollIntoView({ behavior:'smooth', block:'nearest' });
-        /* clear fields */
+        alertEl.textContent = '✓  Inquiry sent successfully! We will get back to you within 24–48 hours.';
+        alertEl.className   = 'form-alert success';
+        alertEl.scrollIntoView({ behavior:'smooth', block:'nearest' });
         document.getElementById('cf-name').value  = '';
         document.getElementById('cf-phone').value = '';
         document.getElementById('cf-email').value = '';
         document.getElementById('cf-type').value  = '';
         document.getElementById('cf-msg').value   = '';
-        btn.disabled = false;
+        btn.disabled       = false;
         note.style.display = 'none';
       }, function(err) {
-        alert.textContent = '✕  Something went wrong (' + (err.text || 'unknown error') + '). Please email us directly at kmrafi.dev@gmail.com';
-        alert.className = 'form-alert error';
-        btn.disabled = false;
-        note.style.display = 'none';
+        alertEl.textContent = '✕  Something went wrong (' + (err.text || 'unknown error') + '). Please email us directly at kmrafi.dev@gmail.com';
+        alertEl.className   = 'form-alert error';
+        btn.disabled        = false;
+        note.style.display  = 'none';
       });
   }
 </script>
